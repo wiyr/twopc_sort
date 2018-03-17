@@ -11,7 +11,7 @@ var (
 	// number of client
 	clientNums = 2
 	// number of messages, simpify program implementation
-	messageNums = 200
+	messageNums = 20
 	// assume dataStreaming has unlimited capacity
 	dataStreaming []chan data
 
