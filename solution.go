@@ -20,7 +20,7 @@ type Queue struct {
 func (q *Queue) push(dat data, lastTime time.Time) {
 	q.buf = append(q.buf, dat)
 	i := len(q.buf) - 2
-	for ; i >= 0 && q.buf[i].sendTime.After(lastTime); i-- {
+	for ; i >= 0; i-- {
 		if q.buf[i].commit > q.buf[i+1].commit {
 			q.buf[i], q.buf[i+1] = q.buf[i+1], q.buf[i]
 		} else {
