@@ -3,12 +3,14 @@ package main
 import (
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 	"time"
 )
 
 type Solution struct {
 	que             *Queue
+	timeWindows     []data
 	lastPrepareTime map[int64]time.Time
 	writeCh         chan data
 }
@@ -20,7 +22,7 @@ type Queue struct {
 func (q *Queue) push(dat data, lastTime time.Time) {
 	q.buf = append(q.buf, dat)
 	i := len(q.buf) - 2
-	for ; i >= 0; i-- {
+	for ; i >= 0 && lastTime.Before(q.buf[i].sendTime); i-- {
 		if q.buf[i].commit > q.buf[i+1].commit {
 			q.buf[i], q.buf[i+1] = q.buf[i+1], q.buf[i]
 		} else {
@@ -62,21 +64,21 @@ func (o *Solution) putIt(dat data) {
 		return
 	}
 
-	//	log.Println(dat.commit, dat.sendTime.UnixNano(), lastTime.UnixNano(), dat.which)
 	o.que.push(dat, lastTime)
 
 	early := o.getEarliestPrepareTime()
+	//log.Println(dat.commit, "send time:", dat.sendTime.Format(time.RFC3339Nano), "prepare time:", lastTime.Format(time.RFC3339Nano), early.Format(time.RFC3339Nano))
 	for !o.que.empty() {
-		if o.que.front().sendTime.Before(early) {
-			/*
-			 *if len(finals) != 0 {
-			 *    if finals[len(finals)-1].commit > o.que.front().commit {
-			 *        log.Println("invalid")
-			 *    }
-			 *}
-			 *finals = append(finals, o.que.front())
-			 */
-			o.writeCh <- o.que.front()
+		frontData := o.que.front()
+		if frontData.sendTime.Before(early) {
+			if len(finals) != 0 {
+				if finals[len(finals)-1].commit > frontData.commit {
+					log.Println("invalid:", finals[len(finals)-1].commit, frontData.commit)
+					os.Exit(0)
+				}
+			}
+			finals = append(finals, frontData)
+			o.writeCh <- frontData
 			o.que.pop()
 		} else {
 			break
@@ -104,7 +106,7 @@ func (o *Solution) writerDemon() {
 }
 
 func (o *Solution) getEarliestPrepareTime() time.Time {
-	result := time.Now()
+	result := time.Now().Add(time.Hour)
 	for _, t := range o.lastPrepareTime {
 		if result.After(t) {
 			result = t
@@ -116,12 +118,36 @@ func (o *Solution) getEarliestPrepareTime() time.Time {
 
 func (o *Solution) simpleSort() {
 	go o.writerDemon()
+
+	streamLen := len(dataStreaming)
+	selectCases := make([]reflect.SelectCase, streamLen)
+	for i := 0; i < streamLen; i++ {
+		selectCases[i] = reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(dataStreaming[i]),
+		}
+	}
+
+	const windowMaxLength = 5
 	for {
-		select {
-		case dat := <-dataStreaming[0]:
-			o.putIt(dat)
-		case dat := <-dataStreaming[1]:
-			o.putIt(dat)
+		_, recvValue, _ := reflect.Select(selectCases)
+		dat, ok := recvValue.Interface().(data)
+		if !ok {
+			log.Printf("[Error] can't convert type %v", recvValue.Type)
+		} else {
+			o.timeWindows = append(o.timeWindows, dat)
+			winLen := len(o.timeWindows)
+			for i := winLen - 1; i > 0; i-- {
+				if o.timeWindows[i].sendTime.Before(o.timeWindows[i-1].sendTime) {
+					o.timeWindows[i], o.timeWindows[i-1] = o.timeWindows[i-1], o.timeWindows[i]
+				} else {
+					break
+				}
+			}
+			if winLen == windowMaxLength {
+				o.putIt(o.timeWindows[0])
+				o.timeWindows = o.timeWindows[1:]
+			}
 		}
 	}
 }
