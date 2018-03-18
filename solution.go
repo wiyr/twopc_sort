@@ -19,6 +19,7 @@ type Solution struct {
 	commitTimeWindow Window // data in this window is ordered by commit value
 	receiveWindow    Window // data in this window is ordered by send time
 	maxRecvWindow    int
+	prepareData      *prepareQueue
 	lastPrepareTime  map[int64]time.Time
 	writeCh          chan data
 }
@@ -27,6 +28,7 @@ func NewOrderBuffer(maxRecvWindow int) *Solution {
 	return &Solution{
 		commitTimeWindow: &orderByCommit{},
 		receiveWindow:    &orderBySendTime{},
+		prepareData:      newPrepareQueue(),
 		maxRecvWindow:    maxRecvWindow,
 		lastPrepareTime:  map[int64]time.Time{},
 		writeCh:          make(chan data, 1000),
@@ -37,15 +39,15 @@ var finals []data
 
 func (o *Solution) putIt(dat DataWithCommitTime) {
 	if dat.kind == "commit" {
+		o.prepareData.removePrepareID(dat.prepare)
 		delete(o.lastPrepareTime, dat.prepare)
 	} else {
-		o.lastPrepareTime[dat.prepare] = dat.sendTime
+		o.prepareData.addPrepareData(dat.data)
 		return
 	}
 
 	o.commitTimeWindow.push(dat)
-
-	early := o.getEarliestPrepareTime()
+	early := o.prepareData.earliestPrepareTime()
 	//log.Println(dat.commit, "send time:", dat.sendTime.Format(time.RFC3339Nano), "prepare time:", lastTime.Format(time.RFC3339Nano), early.Format(time.RFC3339Nano))
 	for o.commitTimeWindow.size() != 0 {
 		frontData := o.commitTimeWindow.front()
@@ -82,17 +84,6 @@ func (o *Solution) writerDemon() {
 			f.WriteString("\n")
 		}
 	}
-}
-
-func (o *Solution) getEarliestPrepareTime() time.Time {
-	result := time.Now().Add(time.Hour)
-	for _, t := range o.lastPrepareTime {
-		if result.After(t) {
-			result = t
-		}
-	}
-
-	return result
 }
 
 func (o *Solution) simpleSort() {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,9 @@ func sort() {
 	// there are 2*clientNums data push to channel almost in the same time
 	solver := NewOrderBuffer(2*clientNums + 1)
 	solver.simpleSort()
+	log.Println("length of data in file:", len(finals))
+	log.Println("length of data in commit window:", solver.commitTimeWindow.size())
+	log.Println("length of data in receive window:", solver.receiveWindow.size())
 }
 
 /*
