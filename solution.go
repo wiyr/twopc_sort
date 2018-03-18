@@ -8,78 +8,57 @@ import (
 	"time"
 )
 
+type Window interface {
+	push(DataWithCommitTime)
+	popFront()
+	front() DataWithCommitTime
+	size() int
+}
+
 type Solution struct {
-	que             *Queue
-	timeWindows     []data
-	lastPrepareTime map[int64]time.Time
-	writeCh         chan data
+	commitTimeWindow Window // data in this window is ordered by commit value
+	receiveWindow    Window // data in this window is ordered by send time
+	maxRecvWindow    int
+	lastPrepareTime  map[int64]time.Time
+	writeCh          chan data
 }
 
-type Queue struct {
-	buf []data
-}
-
-func (q *Queue) push(dat data, lastTime time.Time) {
-	q.buf = append(q.buf, dat)
-	i := len(q.buf) - 2
-	for ; i >= 0 && lastTime.Before(q.buf[i].sendTime); i-- {
-		if q.buf[i].commit > q.buf[i+1].commit {
-			q.buf[i], q.buf[i+1] = q.buf[i+1], q.buf[i]
-		} else {
-			break
-		}
-	}
-}
-
-func (q *Queue) pop() {
-	q.buf = q.buf[1:]
-}
-
-func (q *Queue) front() data {
-	return q.buf[0]
-}
-
-func (q *Queue) empty() bool {
-	return len(q.buf) == 0
-}
-
-func NewOrderBuffer() *Solution {
+func NewOrderBuffer(maxRecvWindow int) *Solution {
 	return &Solution{
-		que:             &Queue{},
-		lastPrepareTime: map[int64]time.Time{},
-		writeCh:         make(chan data, 1000),
+		commitTimeWindow: &orderByCommit{},
+		receiveWindow:    &orderBySendTime{},
+		maxRecvWindow:    maxRecvWindow,
+		lastPrepareTime:  map[int64]time.Time{},
+		writeCh:          make(chan data, 1000),
 	}
 }
 
 var finals []data
-var lastPut int
 
-func (o *Solution) putIt(dat data) {
-	var lastTime time.Time
+func (o *Solution) putIt(dat DataWithCommitTime) {
 	if dat.kind == "commit" {
-		lastTime = o.lastPrepareTime[dat.prepare]
 		delete(o.lastPrepareTime, dat.prepare)
 	} else {
 		o.lastPrepareTime[dat.prepare] = dat.sendTime
 		return
 	}
 
-	o.que.push(dat, lastTime)
+	o.commitTimeWindow.push(dat)
 
 	early := o.getEarliestPrepareTime()
 	//log.Println(dat.commit, "send time:", dat.sendTime.Format(time.RFC3339Nano), "prepare time:", lastTime.Format(time.RFC3339Nano), early.Format(time.RFC3339Nano))
-	for !o.que.empty() {
-		frontData := o.que.front()
-		if frontData.sendTime.Before(early) {
+	for o.commitTimeWindow.size() != 0 {
+		frontData := o.commitTimeWindow.front()
+		if frontData.possibleCommitTime.Before(early) {
 			if len(finals) != 0 {
 				if finals[len(finals)-1].commit > frontData.commit {
 					log.Println("invalid:", finals[len(finals)-1].commit, frontData.commit)
 					os.Exit(0)
 				}
 			}
-			finals = append(finals, frontData)
-			o.writeCh <- frontData
-			o.que.pop()
+			finals = append(finals, frontData.data)
+			o.writeCh <- frontData.data
+			o.commitTimeWindow.popFront()
 		} else {
 			break
 		}
@@ -120,7 +99,7 @@ func (o *Solution) simpleSort() {
 	go o.writerDemon()
 
 	streamLen := len(dataStreaming)
-	selectCases := make([]reflect.SelectCase, streamLen)
+	selectCases := make([]reflect.SelectCase, streamLen+1)
 	for i := 0; i < streamLen; i++ {
 		selectCases[i] = reflect.SelectCase{
 			Dir:  reflect.SelectRecv,
@@ -128,26 +107,42 @@ func (o *Solution) simpleSort() {
 		}
 	}
 
-	const windowMaxLength = 5
+	selectCases[streamLen] = reflect.SelectCase{
+		Dir: reflect.SelectDefault,
+	}
+
+	var ticker <-chan time.Time
+LOOP:
 	for {
-		_, recvValue, _ := reflect.Select(selectCases)
-		dat, ok := recvValue.Interface().(data)
-		if !ok {
-			log.Printf("[Error] can't convert type %v", recvValue.Type)
+		which, recvValue, _ := reflect.Select(selectCases)
+		if which == streamLen {
+			select {
+			case <-ticker:
+				log.Printf("No stream data in one second, exit")
+				break LOOP
+			default:
+			}
 		} else {
-			o.timeWindows = append(o.timeWindows, dat)
-			winLen := len(o.timeWindows)
-			for i := winLen - 1; i > 0; i-- {
-				if o.timeWindows[i].sendTime.Before(o.timeWindows[i-1].sendTime) {
-					o.timeWindows[i], o.timeWindows[i-1] = o.timeWindows[i-1], o.timeWindows[i]
-				} else {
-					break
-				}
+			dat, ok := recvValue.Interface().(data)
+			if !ok {
+				log.Printf("[Error] can't convert type %v", recvValue.Type)
+			} else {
+				o.putInRecvWindow(dat)
 			}
-			if winLen == windowMaxLength {
-				o.putIt(o.timeWindows[0])
-				o.timeWindows = o.timeWindows[1:]
-			}
+			ticker = time.After(time.Second)
+			// TODO: save all remain data into file
 		}
+	}
+}
+
+func (o *Solution) putInRecvWindow(dat data) {
+	dataWithCommitTime := DataWithCommitTime{
+		data:               dat,
+		possibleCommitTime: dat.sendTime,
+	}
+	o.receiveWindow.push(dataWithCommitTime)
+	if o.receiveWindow.size() == o.maxRecvWindow {
+		o.putIt(o.receiveWindow.front())
+		o.receiveWindow.popFront()
 	}
 }

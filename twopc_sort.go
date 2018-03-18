@@ -71,7 +71,8 @@ func main() {
 * and output them in the fastest way you can think
  */
 func sort() {
-	solver := NewOrderBuffer()
+	// there are 2*clientNums data push to channel almost in the same time
+	solver := NewOrderBuffer(2*clientNums + 1)
 	solver.simpleSort()
 }
 
